@@ -1,8 +1,19 @@
-"""Reddit scraper (Selenium + new Reddit UI).
+"""Reddit scraper (Selenium + new Reddit UI) — human-readable guide.
 
-Flow: ask for categories/links -> collect post stubs from each group listing
-(infinite scroll on <shreddit-post>) -> open every post -> extract title,
-body, scores, comment counts -> save one Excel file per group in output/.
+What it does (in plain English):
+  1. Asks you for categories (e.g. "Gaming") and group links (e.g. r/gaming URLs).
+  2. Opens each group page and scrolls down to collect the newest posts.
+  3. Opens every post page to read its title, text, score, and comments.
+  4. Saves one Excel file per group into the output/ folder.
+
+Example run:
+  How many categories? 1
+  Category 1 name: Gaming
+     [Gaming] group link 1/3: https://www.reddit.com/r/gaming/
+  -> output/Gaming__r_gaming.xlsx
+
+Each Excel row = one post, with columns like post_url, username, title,
+content, post_score, comment counts, and post_status (normal/stickied/locked).
 
 Requires: Chrome + matching chromedriver, pandas, selenium, openpyxl.
 Run:  python scrap.py
@@ -87,8 +98,13 @@ def to_int(value, default=0):
 
 
 def classify_post(title, flair, body, promoted=False):
-    """Rough keyword-based type: promote / help / question / fun / general."""
-    text = f"{title} {flair}".lower()
+    """Guess the post's kind from its words — promote / help / question / fun / general.
+
+    This is only a rough keyword guess so you can group posts later.
+    It never changes the scraped data, it just adds a label.
+    """
+    text = f"{title} {flair}".lower()  # check title + flair together, case-insensitive
+    # Ads and self-promotion come first so they are not mistaken for questions.
     if promoted or any(k in text for k in (
             "my project", "i made", "i built", "check out", "launch", "giveaway",
             "discount", "promo", "subscribe", "my channel", "my app", "my website",
@@ -109,10 +125,13 @@ def classify_post(title, flair, body, promoted=False):
 
 
 # ----------------------------------------------------------------------------
-# JAVASCRIPT SNIPPETS (read the data from the <shreddit-...> elements)
-# New Reddit renders posts/comments as web components; we read attributes
-# directly instead of parsing fragile HTML/text.
+# JAVASCRIPT SNIPPETS — how we read data from new Reddit's page.
+# New Reddit shows posts as <shreddit-post> and comments as <shreddit-comment>.
+# Instead of parsing visible text (which changes often), we read each
+# element's built-in attributes (permalink, author, score, ...), which is
+# more stable. Each snippet below returns plain data back to Python.
 # ----------------------------------------------------------------------------
+# LISTING_JS: runs on a group page, returns one small dict per visible post.
 LISTING_JS = """
 return Array.from(document.querySelectorAll('shreddit-post')).map(p => ({
     permalink: p.getAttribute('permalink'),
@@ -128,6 +147,8 @@ return Array.from(document.querySelectorAll('shreddit-post')).map(p => ({
 """
 
 POST_JS = """
+# POST_JS: runs on a single post page, returns the full detail of that post
+# (title, author, body text, flairs, scores). Returns null if no post found.
 const p = document.querySelector('shreddit-post');
 if (!p) return null;
 const textBody = p.querySelector('[slot="text-body"]');
@@ -149,6 +170,8 @@ return {
 """
 
 COMMENTS_JS = """
+# COMMENTS_JS: runs on a post page, returns [score, depth] for every loaded
+# comment so Python can count them (depth 0 = top-level reply).
 return Array.from(document.querySelectorAll('shreddit-comment')).map(c => [
     c.getAttribute('score'),
     c.getAttribute('depth')
@@ -162,7 +185,17 @@ return Array.from(document.querySelectorAll('shreddit-comment')).map(c => [
 # or scrolling stops yielding new posts (MAX_LISTING_STALLS).
 # ----------------------------------------------------------------------------
 def collect_post_stubs(driver, group_url, limit):
-    """Visit a group listing and return up to `limit` lightweight post stubs."""
+    """Visit one group page and collect up to `limit` post links (stubs).
+
+    Args:
+        driver: the shared Chrome browser.
+        group_url: e.g. https://www.reddit.com/r/gaming/.
+        limit: max posts to collect (POSTS_PER_GROUP).
+
+    Returns:
+        A list of small dicts with permalink/author/score/comment count,
+        used later by scrape_post() to open each post.
+    """
     driver.get(to_new_reddit(group_url))
     try:
         WebDriverWait(driver, 20).until(
@@ -237,7 +270,19 @@ def load_more_comments(driver):
 
 
 def scrape_post(driver, stub, category, group_name, profile_cache):
-    """Open one post page and return a flat dict row for the Excel export."""
+    """Open one post page and return a flat dict row for the Excel export.
+
+    Args:
+        stub: one entry from collect_post_stubs() (has the permalink).
+        category: your label, e.g. "Gaming" (becomes the Excel 'category' column).
+        group_name: short id like "r_gaming" (becomes the 'group' column).
+        profile_cache: dict that remembers author lookups to avoid refetching.
+
+    Returns:
+        One dict with identity (post_url, posted_at), author (username,
+        flairs), content (title, content, format, type), and engagement
+        (scores, comment counts, status) fields.
+    """
     # Go to the post page and wait for the web-component post to render.
     driver.get(f"https://www.reddit.com{stub['permalink']}")
     WebDriverWait(driver, 20).until(
@@ -274,30 +319,34 @@ def scrape_post(driver, stub, category, group_name, profile_cache):
     if author == "[deleted]" or body in ("[removed]", "[deleted]"):
         status.append("removed/deleted")
 
-    # One flat row per post — column names become the Excel headers.
+    # One flat row per post — each key below becomes an Excel column header.
     row = {
-        "category": category,
-        "group": group_name,
+        # -- identity: which post and when --
+        "category": category,  # your own label, e.g. "Gaming"
+        "group": group_name,  # short group id, e.g. "r_gaming"
         "post_url": f"https://www.reddit.com{stub['permalink']}",
-        "posted_at": post["created"] or stub["created"],
-        "username": author,
-        "username_length": len(author),
-        "user_flair": post["userFlair"],
-        "post_flair": post["postFlair"],
+        "posted_at": post["created"] or stub["created"],  # Reddit's timestamp
+        # -- author: who posted, including flair badges --
+        "username": author,  # "[deleted]" when the account is gone
+        "username_length": len(author),  # handy for username-length analysis
+        "user_flair": post["userFlair"],  # author's badge in this group
+        "post_flair": post["postFlair"],  # moderator/category tag on the post
+        # -- content: what the post says --
         "title": title,
-        "title_length": len(title),
-        "content": body,
+        "title_length": len(title),  # character count of the title
+        "content": body,  # text body (empty for image/video/link posts)
         "content_length": len(body),
         "content_format": post["format"] or stub["format"],      # text / image / video / link / gallery
-        "post_score": to_int(post["score"], stub["score"]),
-        "post_type": classify_post(title, post["postFlair"], body),
-        "post_status": ", ".join(status) if status else "normal",
-        "total_comment_votes": comment_votes,
-        "total_comments_with_replies": reported,
-        "total_comments_without_replies": top_level,
-        "comments_loaded": loaded,
-        "more_comments_unloaded": loaded < reported,
-        "scraped_at": datetime.now().isoformat(timespec="seconds"),
+        "post_score": to_int(post["score"], stub["score"]),  # upvotes minus downvotes
+        "post_type": classify_post(title, post["postFlair"], body),  # promote/help/question/fun/general
+        "post_status": ", ".join(status) if status else "normal",  # normal, stickied, locked, removed/deleted
+        # -- engagement: how people reacted --
+        "total_comment_votes": comment_votes,  # sum of scores of loaded comments
+        "total_comments_with_replies": reported,  # Reddit's official total (incl. replies)
+        "total_comments_without_replies": top_level,  # only depth-0 comments we saw
+        "comments_loaded": loaded,  # how many comments actually rendered for us
+        "more_comments_unloaded": loaded < reported,  # True when Reddit hid some replies
+        "scraped_at": datetime.now().isoformat(timespec="seconds"),  # when we scraped it
     }
 
     # Optional enrichment: author karma/account age (off by default).
@@ -344,7 +393,11 @@ def save_to_excel(rows, out_path):
 
 
 def scrape_group(driver, category, link, profile_cache):
-    """Scrape all posts of ONE group link and save them to its own Excel file."""
+    """Scrape all posts of ONE group link and save them to its own Excel file.
+
+    Steps: (1) collect post links, (2) open each post with crash-safe
+    autosave every SAVE_EVERY posts, (3) write the final Excel file.
+    """
     group_name = get_group_name(link)
     out_path = get_output_path(category, group_name)
     print(f"\n=== {category} | {link} ===")

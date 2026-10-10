@@ -85,8 +85,31 @@ def to_new_reddit(url):
 
 
 def safe_name(text):
-    """Make a filesystem-safe name for the Excel file (alphanumeric + _-)."""
-    return re.sub(r"[^A-Za-z0-9_-]+", "_", text).strip("_")[:60] or "group"
+    """Convert arbitrary text into a safe, friendly filename for Excel files.
+
+    Operating systems dislike characters like '/', ':', '?', or spaces in filenames.
+    This turns strings like 'Tech & Gadgets / 2024!' into 'Tech_Gadgets_2024'.
+
+    Steps:
+      1. Replace any special characters or spaces with an underscore.
+      2. Trim leading/trailing underscores for a cleaner look.
+      3. Keep up to 60 characters to avoid hitting operating system path limits.
+      4. Fall back to 'group' if the name ends up empty.
+    """
+    if not text:
+        return "group"
+
+    # Step 1: Replace spaces, slashes, and symbols with underscores
+    cleaned = re.sub(r"[^A-Za-z0-9_-]+", "_", str(text))
+
+    # Step 2: Strip extra underscores from edges (e.g., '_Gaming_' -> 'Gaming')
+    cleaned = cleaned.strip("_")
+
+    # Step 3: Limit length so long category/group names don't create overly long file paths
+    cleaned = cleaned[:60]
+
+    # Step 4: Return clean name, or fallback if string had only special characters
+    return cleaned if cleaned else "group"
 
 
 def to_int(value, default=0):
@@ -97,30 +120,108 @@ def to_int(value, default=0):
         return default
 
 
-def classify_post(title, flair, body, promoted=False):
-    """Guess the post's kind from its words — promote / help / question / fun / general.
+def classify_post(title, flair, body="", promoted=False):
+    """Categorize a Reddit post based on keywords in its title and flair.
 
-    This is only a rough keyword guess so you can group posts later.
-    It never changes the scraped data, it just adds a label.
+    This assigns a high-level label to help organize and analyze posts:
+      - 'promote'  -> Showcases, self-promotion, projects, launches, deals, giveaways
+      - 'help'     -> Troubleshooting, bug reports, errors, asking for technical assistance
+      - 'question' -> Inquiries, discussions (ends with '?' or starts with 'How', 'Why', etc.)
+      - 'fun'      -> Memes, jokes, humor, casual fluff, shitposts
+      - 'general'  -> Regular news, stories, and general discussions that don't match above
+
+    Why the checking order matters:
+      1. 'promote' comes FIRST:
+         Example: "I built a new app! Any feedback?"
+         -> Ends with a '?', but the real intent is self-promotion, not a simple question.
+      2. 'help' comes SECOND:
+         Example: "Need help: why is this crashing?"
+         -> Starts with 'why', but the intent is troubleshooting, not a casual discussion.
+      3. 'question' comes THIRD:
+         Example: "What are your favorite Reddit communities?"
+      4. 'fun' comes FOURTH:
+         Example: "Relatable meme for Monday morning lol"
+      5. 'general' is the FALLBACK:
+         Any post that does not trigger the specific keyword buckets above.
     """
-    text = f"{title} {flair}".lower()  # check title + flair together, case-insensitive
-    # Ads and self-promotion come first so they are not mistaken for questions.
-    if promoted or any(k in text for k in (
-            "my project", "i made", "i built", "check out", "launch", "giveaway",
-            "discount", "promo", "subscribe", "my channel", "my app", "my website",
-            "[promo", "self promotion", "self-promotion", "advert")):
+    # Standardize title and flair to lowercase so comparisons are case-insensitive
+    clean_title = str(title or "").strip().lower()
+    combined_text = f"{clean_title} {str(flair or '').lower()}"
+
+    # ------------------------------------------------------------------------
+    # 1. Self-Promotion, Projects & Deals ('promote')
+    # Triggers when creators share their apps, projects, channels, or discounts.
+    # ------------------------------------------------------------------------
+    promo_keywords = (
+        # Project showcases & creations
+        "my project", "i made", "i built", "i created", "i developed",
+        "check out", "launch", "giveaway", "side project", "beta test",
+        "open source project", "feedback on my",
+        # Marketing, channels & social links
+        "discount", "promo", "subscribe", "my channel", "my app", "my website",
+        "my newsletter", "my blog", "my video", "[promo", "self promotion",
+        "self-promotion", "advert", "patreon", "kickstarter", "coupon",
+        "affiliate", "sale ", "free access"
+    )
+    if promoted or any(keyword in combined_text for keyword in promo_keywords):
         return "promote"
-    if any(k in text for k in ("help", "need ", "issue", "error", "problem", "stuck",
-                               "advice", "support", "can't", "cannot", "not working")):
+
+    # ------------------------------------------------------------------------
+    # 2. Seeking Assistance & Troubleshooting ('help')
+    # Triggers when something is broken, throwing errors, or someone is stuck.
+    # ------------------------------------------------------------------------
+    help_keywords = (
+        "help", "need ", "issue", "error", "problem", "stuck",
+        "advice", "support", "can't", "cannot", "not working",
+        "bug", "crash", "crashes", "freezing", "broken",
+        "won't work", "wont work", "failed", "how do i fix",
+        "anyone know why", "troubleshoot", "tech support"
+    )
+    if any(keyword in combined_text for keyword in help_keywords):
         return "help"
-    t = title.strip().lower()
-    if t.endswith("?") or t.startswith(("how ", "what ", "why ", "when ", "where ",
-                                         "which ", "who ", "is ", "are ", "can ",
-                                         "does ", "do ", "should ")) or "question" in text:
+
+    # ------------------------------------------------------------------------
+    # 3. Questions & Inquiries ('question')
+    # Triggers if the post ends with '?', contains 'question', or starts with
+    # common English question words.
+    # ------------------------------------------------------------------------
+    question_starters = (
+        "how ", "what ", "why ", "when ", "where ",
+        "which ", "who ", "is ", "are ", "can ",
+        "does ", "do ", "should ", "could ", "would ",
+        "has anyone ", "have you ", "anyone else ", "is there a ",
+        "thoughts on ", "opinion on "
+    )
+    has_question_mark = clean_title.endswith("?")
+    starts_with_question_word = clean_title.startswith(question_starters)
+    has_question_flair_or_tag = "question" in combined_text
+
+    if has_question_mark or starts_with_question_word or has_question_flair_or_tag:
         return "question"
-    if any(k in text for k in ("meme", "lol", "funny", "humor", "humour", "joke",
-                               "fun ", "shitpost", "[fun")):
+
+    # ------------------------------------------------------------------------
+    # 4. Humor, Memes & Entertainment ('fun')
+    # Casual community entertainment, jokes, and memes.
+    # ------------------------------------------------------------------------
+    fun_keywords = (
+        # Classic humor & laughter
+        "meme", "lol", "funny", "humor", "humour", "joke", "fun ",
+        "lmao", "lmfao", "rofl", "haha", "hahaha", "hilarious", "comedy",
+        # Reddit tropes & slang
+        "shitpost", "shitposting", "shit post", "me_irl", "me irl", "meirl",
+        "bruh", "silly", "fluff", "cursed", "blursed", "wholesome",
+        # Satire & sketches
+        "satire", "parody", "comic", "skit", "pun intended", "puns ",
+        # Flairs and brackets
+        "[fun", "[meme]", "[humor]", "[humour]", "[joke]", "[fluff]", "[wholesome]"
+    )
+
+    if any(keyword in combined_text for keyword in fun_keywords):
         return "fun"
+
+    # ------------------------------------------------------------------------
+    # 5. Default Category ('general')
+    # if other sections don't match, we are marking it as general category
     return "general"
 
 

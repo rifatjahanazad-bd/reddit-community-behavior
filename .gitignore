@@ -9,3 +9,4 @@ data/processed/
 data/exports/*.xlsx
 *.log
 .ipynb_checkpoints/
+.DS_Store
